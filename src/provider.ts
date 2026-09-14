@@ -13,16 +13,19 @@ import {
 } from './openCode';
 import { getOpenRouterApiKey, promptForOpenRouterApiKey } from './secrets';
 import { ExtensionSettings, getSettings } from './settings';
+import type { TimingSummary } from './timing';
 
 export interface ProviderGenerationResult {
   text: string;
   request: unknown;
   response: unknown;
+  timings: TimingSummary;
 }
 
 export class ProviderService implements vscode.Disposable {
   private codexClient: CodexAppServerClient | undefined;
   private codexCommand: string | undefined;
+  private codexFastMode: boolean | undefined;
   private openCodeClient: OpenCodeClient | undefined;
   private openCodeCommand: string | undefined;
   private openCodeServerUrl: string | undefined;
@@ -355,6 +358,7 @@ export class ProviderService implements vscode.Disposable {
     this.codexClient?.dispose();
     this.codexClient = undefined;
     this.codexCommand = undefined;
+    this.codexFastMode = undefined;
     this.openCodeClient?.dispose();
     this.openCodeClient = undefined;
     this.openCodeCommand = undefined;
@@ -425,10 +429,12 @@ export class ProviderService implements vscode.Disposable {
 
   private getCodexClient(settings: ExtensionSettings): CodexAppServerClient {
     const command = settings.codex.command.trim() || 'codex';
-    if (!this.codexClient || this.codexCommand !== command) {
+    const fastMode = settings.codex.fastMode;
+    if (!this.codexClient || this.codexCommand !== command || this.codexFastMode !== fastMode) {
       this.codexClient?.dispose();
-      this.codexClient = new CodexAppServerClient(command, this.context.extension.packageJSON.version);
+      this.codexClient = new CodexAppServerClient(command, this.context.extension.packageJSON.version, fastMode);
       this.codexCommand = command;
+      this.codexFastMode = fastMode;
     }
 
     return this.codexClient;

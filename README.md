@@ -14,6 +14,7 @@ VS Code extension that generates Git commit messages and plans multi-commit chan
 - Writes the generated message to the Git commit message input.
 - Supports OpenRouter API keys.
 - Supports ChatGPT sign-in through the local Codex App Server.
+- Supports optional Codex Fast mode.
 - Supports OpenCode as a gateway for configured providers.
 - Does not store ChatGPT, Codex, or OpenCode provider credentials.
 - Supports workspace settings in `.vscode/settings.json`.
@@ -54,6 +55,7 @@ Example `.vscode/settings.json`:
   "gitCommitPlanner.provider": "codex",
   "gitCommitPlanner.codex.model": "",
   "gitCommitPlanner.codex.reasoningEffort": "",
+  "gitCommitPlanner.codex.fastMode": false,
   "gitCommitPlanner.openRouter.model": "openrouter/auto",
   "gitCommitPlanner.opencode.model": "",
   "gitCommitPlanner.opencode.variant": "",
@@ -78,6 +80,8 @@ Do not store API keys in workspace settings. Use `Git Commit Planner: Set OpenRo
 To use Codex, install the Codex CLI. Select `codex` as the provider. Run `Git Commit Planner: Sign in to Codex with ChatGPT`.
 
 When `gitCommitPlanner.provider` is `codex`, leave `gitCommitPlanner.codex.model` empty to use the Codex default. Use `Git Commit Planner: Select Codex Model` to select a model for the account. Model availability depends on the signed-in account. Use `Git Commit Planner: Select Codex Reasoning Effort` to select a supported value. Leave this setting empty to use the model default.
+
+Set `gitCommitPlanner.codex.fastMode` to `true` to request [Codex Fast mode](https://learn.chatgpt.com/docs/agent-configuration/speed). The selected model must support Fast mode. Fast mode increases ChatGPT credit use or API cost.
 
 To use OpenCode, install the OpenCode CLI. Run `opencode auth login` for each provider that you want to use.
 
@@ -154,6 +158,10 @@ Each generation logs:
 - changed files and statuses
 - response summary
 - final sanitized commit message
+- operation phase timings
+- provider phase timings
+
+Operation timings include provider readiness, diff collection, prompt construction, provider generation, response parsing, and schema repair. Provider timings include the available server, thread, session, model-turn, and cleanup phases.
 
 Enable verbose diagnostics with:
 

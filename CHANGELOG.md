@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.3.0
+
+- Replace the Git Commit Planner extension icon.
+- Add an optional Codex Fast mode setting.
+- Log operation and provider phase timings for commit generation and planning.
+
 ## 2.2.1
 
 - Retry OpenCode requests without structured output when a thinking model rejects the required tool choice.

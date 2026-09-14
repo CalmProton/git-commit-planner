@@ -17,6 +17,7 @@ export interface ExtensionSettings {
     command: string;
     model: string;
     reasoningEffort: CodexReasoningEffort;
+    fastMode: boolean;
   };
   opencode: {
     command: string;
@@ -53,7 +54,8 @@ export function getSettings(resource?: vscode.Uri): ExtensionSettings {
     codex: {
       command: config.get<string>('codex.command', 'codex'),
       model: config.get<string>('codex.model', ''),
-      reasoningEffort: config.get<CodexReasoningEffort>('codex.reasoningEffort', '')
+      reasoningEffort: config.get<CodexReasoningEffort>('codex.reasoningEffort', ''),
+      fastMode: config.get<boolean>('codex.fastMode', false)
     },
     opencode: {
       command: config.get<string>('opencode.command', 'opencode'),

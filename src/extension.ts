@@ -10,6 +10,7 @@ import { buildCommitMessageRepairMessages, buildMessages, parseCommitMessage } f
 import { COMMIT_MESSAGE_OUTPUT_SCHEMA } from './codexProtocol';
 import { clearOpenRouterApiKey, promptForOpenRouterApiKey } from './secrets';
 import { getSettings } from './settings';
+import { PhaseTimer } from './timing';
 
 let output: vscode.OutputChannel;
 let providerService: ProviderService;
@@ -44,6 +45,9 @@ export function deactivate(): void {
 }
 
 async function generateCommitMessage(context: vscode.ExtensionContext, providers: ProviderService): Promise<void> {
+  const logger = createLogger(output);
+  let timings: PhaseTimer | undefined;
+
   try {
     const git = await getGitApi();
     const repository = await pickRepository(git);
@@ -53,8 +57,11 @@ async function generateCommitMessage(context: vscode.ExtensionContext, providers
     }
 
     const settings = getSettings(repository.rootUri);
+    timings = new PhaseTimer();
 
-    if (!(await providers.ensureAccess(settings, repository.rootUri.fsPath))) {
+    if (!(await timings.measure('provider readiness', () =>
+      providers.ensureAccess(settings, repository.rootUri.fsPath)
+    ))) {
       return;
     }
 
@@ -69,8 +76,9 @@ async function generateCommitMessage(context: vscode.ExtensionContext, providers
         const cancellation = token.onCancellationRequested(() => abortController.abort());
 
         try {
-          const logger = createLogger(output);
-          const diffContext = await buildDiffContext(repository, settings);
+          const diffContext = await timings!.measure('diff collection', () =>
+            buildDiffContext(repository, settings)
+          );
           const promptInput = {
             diff: diffContext.diff,
             source: diffContext.source,
@@ -79,7 +87,7 @@ async function generateCommitMessage(context: vscode.ExtensionContext, providers
             truncated: diffContext.truncated,
             settings
           };
-          const messages = buildMessages(promptInput);
+          const messages = timings!.measureSync('prompt construction', () => buildMessages(promptInput));
 
           logger.section('Generation started');
           logger.line(`Extension version: ${context.extension.packageJSON.version}`);
@@ -105,7 +113,8 @@ async function generateCommitMessage(context: vscode.ExtensionContext, providers
               model: modelLabel(settings),
               ...(settings.provider === 'openrouter' ? { baseUrl: settings.openRouter.baseUrl } : settings.provider === 'codex' ? {
                 codexCommand: settings.codex.command,
-                reasoningEffort: settings.codex.reasoningEffort
+                reasoningEffort: settings.codex.reasoningEffort,
+                fastMode: settings.codex.fastMode
               } : {
                 openCodeCommand: settings.opencode.command,
                 openCodeServerUrl: settings.opencode.serverUrl,
@@ -144,13 +153,16 @@ async function generateCommitMessage(context: vscode.ExtensionContext, providers
             logger.line('Enable gitCommitPlanner.debugLogging for full diff, prompt, request, and response diagnostics.');
           }
 
-          let result = await providers.generate(
-            settings,
-            messages,
-            repository.rootUri.fsPath,
-            COMMIT_MESSAGE_OUTPUT_SCHEMA,
-            abortController.signal
+          let result = await timings!.measure('provider generation', () =>
+            providers.generate(
+              settings,
+              messages,
+              repository.rootUri.fsPath,
+              COMMIT_MESSAGE_OUTPUT_SCHEMA,
+              abortController.signal
+            )
           );
+          logger.json('Provider phase timings', result.timings);
 
           if (settings.debugLogging) {
             logger.json('Provider request', result.request);
@@ -160,7 +172,7 @@ async function generateCommitMessage(context: vscode.ExtensionContext, providers
             logger.json('Provider response summary', responseSummary(result.response));
           }
 
-          let message = parseCommitMessage(result.text);
+          let message = timings!.measureSync('response parsing', () => parseCommitMessage(result.text));
           logger.text('Commit message after cleanup', message ?? '[unparseable response]');
 
           for (let attempt = 1; !message?.trim() && attempt <= COMMIT_MESSAGE_REPAIR_ATTEMPTS; attempt += 1) {
@@ -176,13 +188,16 @@ async function generateCommitMessage(context: vscode.ExtensionContext, providers
               logger.json('Repair messages sent to provider', repairMessages);
             }
 
-            result = await providers.generate(
-              settings,
-              repairMessages,
-              repository.rootUri.fsPath,
-              COMMIT_MESSAGE_OUTPUT_SCHEMA,
-              abortController.signal
+            result = await timings!.measure(`schema repair ${attempt}`, () =>
+              providers.generate(
+                settings,
+                repairMessages,
+                repository.rootUri.fsPath,
+                COMMIT_MESSAGE_OUTPUT_SCHEMA,
+                abortController.signal
+              )
             );
+            logger.json(`Provider repair phase timings ${attempt}`, result.timings);
 
             if (settings.debugLogging) {
               logger.json('Provider repair request', result.request);
@@ -192,7 +207,10 @@ async function generateCommitMessage(context: vscode.ExtensionContext, providers
               logger.json('Provider repair response summary', responseSummary(result.response));
             }
 
-            message = parseCommitMessage(result.text);
+            message = timings!.measureSync(
+              `response parsing after repair ${attempt}`,
+              () => parseCommitMessage(result.text)
+            );
             logger.text(`Commit message after repair ${attempt}`, message ?? '[unparseable response]');
           }
 
@@ -208,7 +226,6 @@ async function generateCommitMessage(context: vscode.ExtensionContext, providers
       }
     );
   } catch (error) {
-    const logger = createLogger(output);
     if (error instanceof OpenRouterResponseError || error instanceof CodexResponseError || error instanceof OpenCodeResponseError) {
       logger.section('Provider failure diagnostics');
       logger.json('Provider request', error.request);
@@ -218,6 +235,11 @@ async function generateCommitMessage(context: vscode.ExtensionContext, providers
     const message = error instanceof Error ? error.message : String(error);
     logger.error(error);
     vscode.window.showErrorMessage(`Git Commit Planner: ${message}`);
+  } finally {
+    if (timings) {
+      logger.section('Performance timings');
+      logger.json('Commit message phase timings', timings.snapshot());
+    }
   }
 }
 

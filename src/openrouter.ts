@@ -1,4 +1,5 @@
 import type { ExtensionSettings } from './settings';
+import { PhaseTimer, TimingSummary } from './timing';
 
 export interface ChatMessage {
   role: 'system' | 'user';
@@ -17,12 +18,14 @@ export interface OpenRouterResponseLog {
   bodyText: string;
   payload: unknown;
   choiceSummary: Record<string, unknown>;
+  timings?: TimingSummary;
 }
 
 export interface OpenRouterResult {
   text: string;
   request: OpenRouterRequestLog;
   response: OpenRouterResponseLog;
+  timings: TimingSummary;
 }
 
 export class OpenRouterResponseError extends Error {
@@ -42,6 +45,7 @@ export async function createOpenRouterCommitMessage(
   settings: ExtensionSettings,
   signal?: AbortSignal
 ): Promise<OpenRouterResult> {
+  const timings = new PhaseTimer();
   const baseUrl = settings.openRouter.baseUrl.replace(/\/+$/, '');
   const url = `${baseUrl}/chat/completions`;
   const headers: Record<string, string> = {
@@ -77,22 +81,25 @@ export async function createOpenRouterCommitMessage(
     body
   };
 
-  const response = await fetch(url, {
-    method: 'POST',
-    headers,
-    signal,
-    body: JSON.stringify(body)
+  const { response, text, payload } = await timings.measure('model request', async () => {
+    const modelResponse = await fetch(url, {
+      method: 'POST',
+      headers,
+      signal,
+      body: JSON.stringify(body)
+    });
+    const bodyText = await modelResponse.text();
+    return { response: modelResponse, text: bodyText, payload: parseJson(bodyText) };
   });
-
-  const text = await response.text();
-  const payload = parseJson(text);
   const choice = payload?.choices?.[0];
+  const timingSummary = timings.snapshot();
   const responseLog: OpenRouterResponseLog = {
     status: response.status,
     statusText: response.statusText,
     bodyText: text,
     payload,
-    choiceSummary: summarizeChoice(payload, choice)
+    choiceSummary: summarizeChoice(payload, choice),
+    timings: timingSummary
   };
 
   if (!response.ok) {
@@ -109,7 +116,8 @@ export async function createOpenRouterCommitMessage(
   return {
     text: result,
     request,
-    response: responseLog
+    response: responseLog,
+    timings: timingSummary
   };
 }
 

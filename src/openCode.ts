@@ -3,6 +3,7 @@ import { createServer } from 'net';
 import type { ChatMessage } from './openrouter';
 import type { ExtensionSettings } from './settings';
 import { isRecord } from './codexProtocol';
+import { PhaseTimer, TimingSummary } from './timing';
 
 const START_TIMEOUT_MS = 30_000;
 const REQUEST_TIMEOUT_MS = 10 * 60 * 1000;
@@ -60,12 +61,14 @@ export interface OpenCodeResponseLog {
   payload: unknown;
   summary: Record<string, unknown>;
   stderr?: string;
+  timings?: TimingSummary;
 }
 
 export interface OpenCodeGenerationResult {
   text: string;
   request: OpenCodeRequestLog;
   response: OpenCodeResponseLog;
+  timings: TimingSummary;
 }
 
 export class OpenCodeResponseError extends Error {
@@ -116,63 +119,78 @@ export class OpenCodeClient {
     outputSchema?: unknown,
     signal?: AbortSignal
   ): Promise<OpenCodeGenerationResult> {
-    await this.start(cwd, signal);
+    const timings = new PhaseTimer();
 
-    const sessionPayload = await this.request<unknown>(
-      'POST',
-      '/session',
-      cwd,
-      { title: 'Git Commit Planner' },
-      signal
-    );
-    const sessionId = getStringProperty(sessionPayload, 'id');
+    try {
+      await timings.measure('server readiness', () => this.start(cwd, signal));
 
-    if (!sessionId) {
-      throw this.invalidResponse(
+      const sessionPayload = await timings.measure('session startup', () => this.request<unknown>(
         'POST',
         '/session',
         cwd,
         { title: 'Git Commit Planner' },
-        sessionPayload,
-        'OpenCode did not return a session id.'
-      );
-    }
+        signal
+      ));
+      const sessionId = getStringProperty(sessionPayload, 'id');
 
-    const onAbort = () => {
-      void this.abortSession(sessionId, cwd);
-    };
-    signal?.addEventListener('abort', onAbort, { once: true });
+      if (!sessionId) {
+        throw this.invalidResponse(
+          'POST',
+          '/session',
+          cwd,
+          { title: 'Git Commit Planner' },
+          sessionPayload,
+          'OpenCode did not return a session id.'
+        );
+      }
 
-    try {
-      const model = parseModelReference(settings.opencode.model);
-      const variant = settings.opencode.variant.trim() || model?.variant;
-      const system = messages
-        .filter(message => message.role === 'system')
-        .map(message => message.content.trim())
-        .filter(Boolean)
-        .join('\n\n');
-      const userPrompt = messages
-        .filter(message => message.role === 'user')
-        .map(message => message.content)
-        .join('\n\n');
-      const tools = await this.getDeniedTools(cwd, signal);
-      const format = outputSchema && isRecord(outputSchema)
-        ? { type: 'json_schema', schema: outputSchema, retryCount: 2 }
-        : undefined;
-      const body: Record<string, unknown> = {
-        ...(model ? { model: { providerID: model.providerID, modelID: model.modelID } } : {}),
-        ...(variant ? { variant } : {}),
-        ...(system ? { system } : {}),
-        tools,
-        ...(format ? { format } : {}),
-        parts: [{ type: 'text', text: userPrompt }]
+      const onAbort = () => {
+        void this.abortSession(sessionId, cwd);
       };
+      signal?.addEventListener('abort', onAbort, { once: true });
 
-      const result = await this.prompt(sessionId, cwd, body, signal);
-      return this.toGenerationResult(result.payload, result.request, result.response);
-    } finally {
-      signal?.removeEventListener('abort', onAbort);
-      await this.deleteSession(sessionId, cwd);
+      let generationResult: Omit<OpenCodeGenerationResult, 'timings'>;
+
+      try {
+        const model = parseModelReference(settings.opencode.model);
+        const variant = settings.opencode.variant.trim() || model?.variant;
+        const system = messages
+          .filter(message => message.role === 'system')
+          .map(message => message.content.trim())
+          .filter(Boolean)
+          .join('\n\n');
+        const userPrompt = messages
+          .filter(message => message.role === 'user')
+          .map(message => message.content)
+          .join('\n\n');
+        const tools = await timings.measure('tool policy', () => this.getDeniedTools(cwd, signal));
+        const format = outputSchema && isRecord(outputSchema)
+          ? { type: 'json_schema', schema: outputSchema, retryCount: 2 }
+          : undefined;
+        const body: Record<string, unknown> = {
+          ...(model ? { model: { providerID: model.providerID, modelID: model.modelID } } : {}),
+          ...(variant ? { variant } : {}),
+          ...(system ? { system } : {}),
+          tools,
+          ...(format ? { format } : {}),
+          parts: [{ type: 'text', text: userPrompt }]
+        };
+
+        const result = await timings.measure('model turn', () => this.prompt(sessionId, cwd, body, signal));
+        generationResult = this.toGenerationResult(result.payload, result.request, result.response);
+      } finally {
+        signal?.removeEventListener('abort', onAbort);
+        await timings.measure('session cleanup', () => this.deleteSession(sessionId, cwd));
+      }
+
+      const timingSummary = timings.snapshot();
+      generationResult.response.timings = timingSummary;
+      return { ...generationResult, timings: timingSummary };
+    } catch (error) {
+      if (error instanceof OpenCodeResponseError) {
+        error.response.timings = timings.snapshot();
+      }
+      throw error;
     }
   }
 
@@ -478,7 +496,7 @@ export class OpenCodeClient {
     payload: unknown,
     request: OpenCodeRequestLog,
     response: OpenCodeResponseLog
-  ): OpenCodeGenerationResult {
+  ): Omit<OpenCodeGenerationResult, 'timings'> {
     const errorMessage = extractAssistantError(payload);
     if (errorMessage) {
       response.summary.error = errorMessage;

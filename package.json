@@ -2,7 +2,7 @@
   "name": "git-commit-planner",
   "displayName": "Git Commit Planner",
   "description": "Generate Git commit messages and plan multi-commit changes in VS Code with OpenRouter, Codex, or OpenCode.",
-  "version": "2.2.1",
+  "version": "2.3.0",
   "publisher": "MadElectron",
   "license": "MIT",
   "icon": "icon.png",
@@ -423,6 +423,13 @@
             "default": "",
             "order": 3,
             "markdownDescription": "Sets the reasoning effort for the selected Codex model. Leave this field empty to use the model default. Use **Git Commit Planner: Select Codex Reasoning Effort** to choose a value."
+          },
+          "gitCommitPlanner.codex.fastMode": {
+            "type": "boolean",
+            "scope": "resource",
+            "default": false,
+            "order": 4,
+            "markdownDescription": "Uses Codex Fast mode when the selected model supports it. Fast mode increases ChatGPT credit use or API cost. See [Codex Fast mode](https://learn.chatgpt.com/docs/agent-configuration/speed)."
           }
         }
       },

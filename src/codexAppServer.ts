@@ -1,6 +1,7 @@
 import { ChildProcessWithoutNullStreams, spawn } from 'child_process';
 import type { ChatMessage } from './openrouter';
 import type { ExtensionSettings } from './settings';
+import { PhaseTimer, TimingSummary } from './timing';
 import {
   COMMIT_MESSAGE_OUTPUT_SCHEMA,
   extractAgentMessageTexts,
@@ -48,12 +49,14 @@ export interface CodexResponseLog {
   resultSummary?: Record<string, unknown>;
   error?: Record<string, unknown>;
   stderr?: string;
+  timings?: TimingSummary;
 }
 
 export interface CodexGenerationResult {
   text: string;
   request: CodexRequestLog;
   response: CodexResponseLog;
+  timings: TimingSummary;
 }
 
 export interface CodexLoginStart {
@@ -110,7 +113,8 @@ export class CodexAppServerClient {
 
   constructor(
     private readonly command: string,
-    private readonly clientVersion = '2.0.0'
+    private readonly clientVersion = '2.0.0',
+    private readonly fastMode = false
   ) {}
 
   async accountRead(signal?: AbortSignal): Promise<CodexAccountStatus> {
@@ -221,96 +225,113 @@ export class CodexAppServerClient {
     outputSchema: unknown = COMMIT_MESSAGE_OUTPUT_SCHEMA,
     signal?: AbortSignal
   ): Promise<CodexGenerationResult> {
-    await this.start();
+    const timings = new PhaseTimer();
 
-    const model = settings.codex.model.trim();
-    const developerInstructions = messages
-      .filter(message => message.role === 'system')
-      .map(message => message.content.trim())
-      .filter(Boolean)
-      .join('\n\n');
-    const userPrompt = messages
-      .filter(message => message.role === 'user')
-      .map(message => message.content)
-      .join('\n\n');
+    try {
+      await timings.measure('app server readiness', () => this.start());
 
-    const threadParams: Record<string, unknown> = {
-      ...(model ? { model } : {}),
-      cwd,
-      approvalPolicy: 'never',
-      sandbox: 'read-only',
-      ephemeral: true,
-      ...(developerInstructions ? { developerInstructions } : {})
-    };
-    const threadResult = await this.request<unknown>('thread/start', threadParams, undefined, DEFAULT_REQUEST_TIMEOUT_MS);
-    const thread = isRecord(threadResult) ? threadResult.thread : undefined;
-    const threadId = getStringProperty(thread, 'id');
+      const model = settings.codex.model.trim();
+      const developerInstructions = messages
+        .filter(message => message.role === 'system')
+        .map(message => message.content.trim())
+        .filter(Boolean)
+        .join('\n\n');
+      const userPrompt = messages
+        .filter(message => message.role === 'user')
+        .map(message => message.content)
+        .join('\n\n');
 
-    if (!threadId) {
-      throw this.invalidResponse('thread/start', threadResult, 'Codex did not return a thread id.');
-    }
-
-    const effort = settings.codex.reasoningEffort.trim();
-    const turnParams: Record<string, unknown> = {
-      threadId,
-      input: [{ type: 'text', text: userPrompt, text_elements: [] }],
-      cwd,
-      approvalPolicy: 'never',
-      sandboxPolicy: { type: 'readOnly', networkAccess: false },
-      ...(model ? { model } : {}),
-      ...(effort ? { effort } : {}),
-      outputSchema
-    };
-    const turnResult = await this.request<unknown>('turn/start', turnParams, undefined, DEFAULT_REQUEST_TIMEOUT_MS);
-    const initialTurn = isRecord(turnResult) ? turnResult.turn : undefined;
-    const turnId = getStringProperty(initialTurn, 'id');
-
-    if (!turnId) {
-      throw this.invalidResponse('turn/start', turnResult, 'Codex did not return a turn id.');
-    }
-
-    const request: CodexRequestLog = {
-      method: 'turn/start',
-      params: {
-        threadId,
-        model: model || '(Codex default)',
+      const threadParams: Record<string, unknown> = {
+        ...(model ? { model } : {}),
         cwd,
-        inputCount: 1,
-        outputSchema
-      }
-    };
-
-    let finalTurn: unknown;
-    const initialStatus = getStringProperty(initialTurn, 'status');
-    if (initialStatus === 'completed' || initialStatus === 'failed' || initialStatus === 'interrupted') {
-      finalTurn = initialTurn;
-    } else {
-      let aborted = false;
-      const onAbort = () => {
-        aborted = true;
-        void this.request('turn/interrupt', { threadId, turnId }, undefined, 10_000).catch(() => undefined);
+        approvalPolicy: 'never',
+        sandbox: 'read-only',
+        ephemeral: true,
+        ...(developerInstructions ? { developerInstructions } : {})
       };
-      signal?.addEventListener('abort', onAbort, { once: true });
+      const threadResult = await timings.measure('thread startup', () =>
+        this.request<unknown>('thread/start', threadParams, undefined, DEFAULT_REQUEST_TIMEOUT_MS)
+      );
+      const thread = isRecord(threadResult) ? threadResult.thread : undefined;
+      const threadId = getStringProperty(thread, 'id');
 
-      try {
-        finalTurn = (await this.waitForTurn(threadId, turnId, request, signal)).turn;
-      } finally {
-        signal?.removeEventListener('abort', onAbort);
+      if (!threadId) {
+        throw this.invalidResponse('thread/start', threadResult, 'Codex did not return a thread id.');
       }
 
-      if (aborted || signal?.aborted) {
-        throw createAbortError();
+      const effort = settings.codex.reasoningEffort.trim();
+      const turnParams: Record<string, unknown> = {
+        threadId,
+        input: [{ type: 'text', text: userPrompt, text_elements: [] }],
+        cwd,
+        approvalPolicy: 'never',
+        sandboxPolicy: { type: 'readOnly', networkAccess: false },
+        ...(model ? { model } : {}),
+        ...(effort ? { effort } : {}),
+        outputSchema
+      };
+      const turnResult = await timings.measure('turn startup', () =>
+        this.request<unknown>('turn/start', turnParams, undefined, DEFAULT_REQUEST_TIMEOUT_MS)
+      );
+      const initialTurn = isRecord(turnResult) ? turnResult.turn : undefined;
+      const turnId = getStringProperty(initialTurn, 'id');
+
+      if (!turnId) {
+        throw this.invalidResponse('turn/start', turnResult, 'Codex did not return a turn id.');
       }
+
+      const request: CodexRequestLog = {
+        method: 'turn/start',
+        params: {
+          threadId,
+          model: model || '(Codex default)',
+          cwd,
+          inputCount: 1,
+          outputSchema
+        }
+      };
+
+      let finalTurn: unknown;
+      const initialStatus = getStringProperty(initialTurn, 'status');
+      if (initialStatus === 'completed' || initialStatus === 'failed' || initialStatus === 'interrupted') {
+        finalTurn = timings.measureSync('model turn', () => initialTurn);
+      } else {
+        let aborted = false;
+        const onAbort = () => {
+          aborted = true;
+          void this.request('turn/interrupt', { threadId, turnId }, undefined, 10_000).catch(() => undefined);
+        };
+        signal?.addEventListener('abort', onAbort, { once: true });
+
+        try {
+          finalTurn = (await timings.measure('model turn', () =>
+            this.waitForTurn(threadId, turnId, request, signal)
+          )).turn;
+        } finally {
+          signal?.removeEventListener('abort', onAbort);
+        }
+
+        if (aborted || signal?.aborted) {
+          throw createAbortError();
+        }
+      }
+
+      const timingSummary = timings.snapshot();
+      const response: CodexResponseLog = {
+        status: 'success',
+        resultSummary: summarizeTurn(finalTurn),
+        stderr: this.stderrBuffer || undefined,
+        timings: timingSummary
+      };
+      const text = this.extractFinalTurnText(threadId, turnId, finalTurn, request, response);
+
+      return { text, request, response, timings: timingSummary };
+    } catch (error) {
+      if (error instanceof CodexResponseError) {
+        error.response.timings = timings.snapshot();
+      }
+      throw error;
     }
-
-    const response: CodexResponseLog = {
-      status: 'success',
-      resultSummary: summarizeTurn(finalTurn),
-      stderr: this.stderrBuffer || undefined
-    };
-    const text = this.extractFinalTurnText(threadId, turnId, finalTurn, request, response);
-
-    return { text, request, response };
   }
 
   dispose(): void {
@@ -354,7 +375,7 @@ export class CodexAppServerClient {
   }
 
   private async spawnAndInitialize(): Promise<void> {
-    const child = spawn(this.command, ['app-server', '--stdio'], {
+    const child = spawn(this.command, buildCodexAppServerArgs(this.fastMode), {
       stdio: ['pipe', 'pipe', 'pipe'],
       windowsHide: true
     });
@@ -743,6 +764,12 @@ export class CodexAppServerClient {
     }
     this.pending.clear();
   }
+}
+
+export function buildCodexAppServerArgs(fastMode = false): string[] {
+  return fastMode
+    ? ['app-server', '--stdio', '-c', 'service_tier="fast"', '-c', 'features.fast_mode=true']
+    : ['app-server', '--stdio'];
 }
 
 function isResponse(message: JsonRpcMessage): message is { id: JsonRpcId; result?: unknown; error?: { code: number; message: string; data?: unknown } } {

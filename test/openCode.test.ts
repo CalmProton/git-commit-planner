@@ -113,6 +113,13 @@ describe('OpenCode helpers', () => {
       );
 
       expect(result.text).toBe('{"commitMessage":"feat: use OpenCode"}');
+      expect(result.timings.phases.map(timing => timing.phase)).toEqual([
+        'server readiness',
+        'session startup',
+        'tool policy',
+        'model turn',
+        'session cleanup'
+      ]);
       expect(messageBodies).toHaveLength(2);
       expect(messageBodies[0]).toHaveProperty('format');
       expect(messageBodies[1]).not.toHaveProperty('format');

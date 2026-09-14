@@ -28,6 +28,7 @@ import {
 import { COMMIT_MESSAGE_OUTPUT_SCHEMA, COMMIT_PLAN_OUTPUT_SCHEMA } from './codexProtocol';
 import { ProviderService } from './provider';
 import { ExtensionSettings, getSettings } from './settings';
+import { PhaseTimer } from './timing';
 
 const TREE_ID = 'gitCommitPlanner.plannedCommits';
 const FILE_TRANSFER_MIME = 'application/vnd.git-commit-planner.planned-commit-files';
@@ -199,12 +200,18 @@ class PlannedCommitsController implements
         return;
       }
 
-      const settings = getSettings(repository.rootUri);
-      if (!(await this.provider.ensureAccess(settings, repository.rootUri.fsPath))) {
-        return;
-      }
+      const logger = createLogger(this.output);
+      const timings = new PhaseTimer();
 
-      await vscode.window.withProgress(
+      try {
+        const settings = getSettings(repository.rootUri);
+        if (!(await timings.measure('provider readiness', () =>
+          this.provider.ensureAccess(settings, repository.rootUri.fsPath)
+        ))) {
+          return;
+        }
+
+        await vscode.window.withProgress(
         {
           location: vscode.ProgressLocation.Notification,
           title: 'Planning commits',
@@ -219,23 +226,28 @@ class PlannedCommitsController implements
               ...settings,
               maxOutputTokens: settings.maxPlanOutputTokens
             };
-            const logger = createLogger(this.output);
-            const diffContext = await buildWorkingTreeDiffContext(repository, planSettings);
-            const fingerprint = await getWorkingTreeFingerprint(repository);
-            const files = diffContext.files.map(file => ({
-              path: file.path,
-              status: file.status,
-              uri: vscode.Uri.file(path.join(repository.rootUri.fsPath, file.path))
+            const diffContext = await timings.measure('diff collection', () =>
+              buildWorkingTreeDiffContext(repository, planSettings)
+            );
+            const fingerprint = await timings.measure('working tree fingerprint', () =>
+              getWorkingTreeFingerprint(repository)
+            );
+            const { files, messages } = timings.measureSync('prompt construction', () => ({
+              files: diffContext.files.map(file => ({
+                path: file.path,
+                status: file.status,
+                uri: vscode.Uri.file(path.join(repository.rootUri.fsPath, file.path))
+              })),
+              messages: buildPlanMessages({
+                diff: diffContext.diff,
+                source: diffContext.source,
+                files: diffContext.files,
+                allFiles: diffContext.files,
+                budget: diffContext.budget,
+                truncated: diffContext.truncated,
+                settings: planSettings
+              })
             }));
-            const messages = buildPlanMessages({
-              diff: diffContext.diff,
-              source: diffContext.source,
-              files: diffContext.files,
-              allFiles: diffContext.files,
-              budget: diffContext.budget,
-              truncated: diffContext.truncated,
-              settings: planSettings
-            });
 
             logger.section('Multi-commit planning started');
             logger.line(`Extension version: ${this.context.extension.packageJSON.version}`);
@@ -254,14 +266,17 @@ class PlannedCommitsController implements
               logger.json('Messages sent to provider', messages);
             }
 
-            const result = await this.provider.generate(
-              planSettings,
-              messages,
-              repository.rootUri.fsPath,
-              COMMIT_PLAN_OUTPUT_SCHEMA,
-              abortController.signal
+            const result = await timings.measure('provider generation', () =>
+              this.provider.generate(
+                planSettings,
+                messages,
+                repository.rootUri.fsPath,
+                COMMIT_PLAN_OUTPUT_SCHEMA,
+                abortController.signal
+              )
             );
-            const parsed = parsePlannedCommits(result.text);
+            const parsed = timings.measureSync('response parsing', () => parsePlannedCommits(result.text));
+            logger.json('Provider phase timings', result.timings);
 
             if (settings.debugLogging) {
               logger.json('Provider request', result.request);
@@ -282,7 +297,8 @@ class PlannedCommitsController implements
               expectedFiles,
               logger,
               debugLogging: settings.debugLogging,
-              signal: abortController.signal
+              signal: abortController.signal,
+              timings
             });
             this.plan = {
               repository,
@@ -299,7 +315,11 @@ class PlannedCommitsController implements
             cancellation.dispose();
           }
         }
-      );
+        );
+      } finally {
+        logger.section('Performance timings');
+        logger.json('Commit planning phase timings', timings.snapshot());
+      }
     });
   }
 
@@ -418,28 +438,34 @@ class PlannedCommitsController implements
 
   async regenerateCommitMessage(item?: PlanItem): Promise<void> {
     await this.runWithErrors(async () => {
-      await this.reconcilePlanWithPendingChanges();
+      const logger = createLogger(this.output);
+      const timings = new PhaseTimer();
 
-      if (!this.plan) {
-        throw new Error('No commit plan to regenerate.');
-      }
+      try {
+        await timings.measure('plan reconciliation', () => this.reconcilePlanWithPendingChanges());
 
-      const commit = await this.pickCommit(item, 'Select commit group to regenerate');
+        if (!this.plan) {
+          throw new Error('No commit plan to regenerate.');
+        }
 
-      if (!commit) {
-        return;
-      }
+        const commit = await this.pickCommit(item, 'Select commit group to regenerate');
 
-      if (commit.files.length === 0) {
-        throw new Error(`Planned commit "${firstLine(commit.message)}" has no files to describe.`);
-      }
+        if (!commit) {
+          return;
+        }
 
-      const settings = getSettings(this.plan.repository.rootUri);
-      if (!(await this.provider.ensureAccess(settings, this.plan.repository.rootUri.fsPath))) {
-        return;
-      }
+        if (commit.files.length === 0) {
+          throw new Error(`Planned commit "${firstLine(commit.message)}" has no files to describe.`);
+        }
 
-      await vscode.window.withProgress(
+        const settings = getSettings(this.plan.repository.rootUri);
+        if (!(await timings.measure('provider readiness', () =>
+          this.provider.ensureAccess(settings, this.plan!.repository.rootUri.fsPath)
+        ))) {
+          return;
+        }
+
+        await vscode.window.withProgress(
         {
           location: vscode.ProgressLocation.Notification,
           title: 'Regenerating commit message',
@@ -450,24 +476,27 @@ class PlannedCommitsController implements
           const cancellation = token.onCancellationRequested(() => abortController.abort());
 
           try {
-            const logger = createLogger(this.output);
-            const messages = buildPlannedCommitMessageMessages({
-              diff: this.plan!.diffContext.diff,
-              source: this.plan!.diffContext.source,
-              files: this.plan!.diffContext.files,
-              selectedFiles: commit.files,
-              budget: this.plan!.diffContext.budget,
-              truncated: this.plan!.diffContext.truncated,
-              settings
-            });
-            const result = await this.provider.generate(
-              settings,
-              messages,
-              this.plan!.repository.rootUri.fsPath,
-              COMMIT_MESSAGE_OUTPUT_SCHEMA,
-              abortController.signal
+            const messages = timings.measureSync('prompt construction', () =>
+              buildPlannedCommitMessageMessages({
+                diff: this.plan!.diffContext.diff,
+                source: this.plan!.diffContext.source,
+                files: this.plan!.diffContext.files,
+                selectedFiles: commit.files,
+                budget: this.plan!.diffContext.budget,
+                truncated: this.plan!.diffContext.truncated,
+                settings
+              })
             );
-            const message = sanitizeCommitMessage(result.text);
+            const result = await timings.measure('provider generation', () =>
+              this.provider.generate(
+                settings,
+                messages,
+                this.plan!.repository.rootUri.fsPath,
+                COMMIT_MESSAGE_OUTPUT_SCHEMA,
+                abortController.signal
+              )
+            );
+            const message = timings.measureSync('response parsing', () => sanitizeCommitMessage(result.text));
 
             if (!message.trim()) {
               throw new Error('Generated commit message was empty after cleanup.');
@@ -475,6 +504,7 @@ class PlannedCommitsController implements
 
             logger.section('Planned commit message regenerated');
             logger.json('Selected files', commit.files);
+            logger.json('Provider phase timings', result.timings);
             logger.text('Commit message after cleanup', message);
 
             commit.message = message;
@@ -484,7 +514,11 @@ class PlannedCommitsController implements
             cancellation.dispose();
           }
         }
-      );
+        );
+      } finally {
+        logger.section('Performance timings');
+        logger.json('Planned commit message phase timings', timings.snapshot());
+      }
     });
   }
 
@@ -866,10 +900,13 @@ async function buildValidatedPlan(input: {
   logger: Logger;
   debugLogging: boolean;
   signal: AbortSignal;
+  timings: PhaseTimer;
 }): Promise<PlannedCommitGroup[]> {
   let planText = input.initialPlanText;
   let parsedPlan = input.initialParsedPlan;
-  let validation = analyzePlan(parsedPlan, input.expectedFiles);
+  let validation = input.timings.measureSync('plan validation', () =>
+    analyzePlan(parsedPlan, input.expectedFiles)
+  );
 
   if (validation.valid && parsedPlan) {
     return toPlannedCommitGroups(parsedPlan);
@@ -890,7 +927,8 @@ async function buildValidatedPlan(input: {
       logger: input.logger,
       debugLogging: input.debugLogging,
       signal: input.signal,
-      attempt
+      attempt,
+      timings: input.timings
     });
 
     if (!repaired) {
@@ -898,8 +936,14 @@ async function buildValidatedPlan(input: {
     }
 
     planText = repaired.text;
-    parsedPlan = parsePlannedCommits(repaired.text);
-    validation = analyzePlan(parsedPlan, input.expectedFiles);
+    parsedPlan = input.timings.measureSync(
+      `response parsing after plan repair ${attempt}`,
+      () => parsePlannedCommits(repaired.text)
+    );
+    validation = input.timings.measureSync(
+      `plan validation after repair ${attempt}`,
+      () => analyzePlan(parsedPlan, input.expectedFiles)
+    );
 
     if (validation.valid && parsedPlan) {
       input.logger.line(`Commit plan repair attempt ${attempt} produced a valid plan.`);
@@ -911,7 +955,9 @@ async function buildValidatedPlan(input: {
 
   input.logger.section('Commit plan repaired locally');
   input.logger.json('Final validation issue before local repair', summarizeValidation(validation));
-  return completePlanLocally(parsedPlan, input.expectedFiles);
+  return input.timings.measureSync('local plan completion', () =>
+    completePlanLocally(parsedPlan, input.expectedFiles)
+  );
 }
 
 async function requestPlanRepair(input: {
@@ -926,6 +972,7 @@ async function requestPlanRepair(input: {
   debugLogging: boolean;
   signal: AbortSignal;
   attempt: number;
+  timings: PhaseTimer;
 }): Promise<{ text: string } | undefined> {
   const messages = buildPlanRepairMessages({
     allFiles: input.allFiles,
@@ -943,13 +990,16 @@ async function requestPlanRepair(input: {
   }
 
   try {
-    const result = await input.provider.generate(
-      input.settings,
-      messages,
-      input.cwd,
-      COMMIT_PLAN_OUTPUT_SCHEMA,
-      input.signal
+    const result = await input.timings.measure(`schema repair ${input.attempt}`, () =>
+      input.provider.generate(
+        input.settings,
+        messages,
+        input.cwd,
+        COMMIT_PLAN_OUTPUT_SCHEMA,
+        input.signal
+      )
     );
+    input.logger.json(`Provider repair phase timings ${input.attempt}`, result.timings);
 
     if (input.debugLogging) {
       input.logger.json('Provider repair request', result.request);
