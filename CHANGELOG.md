@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2.4.0
 
 - Add `gitCommitPlanner.ignoredGlobs` so binary and asset content (images, SVG, 3D files, media, lockfiles, source maps, and minified bundles) stays out of the prompt while the files stay in the changed-file list.
 - Add `gitCommitPlanner.openRouter.reasoningEffort` so OpenRouter reasoning effort is configurable. The default stays `none`, and the extension retries without a reasoning setting when a model requires reasoning.

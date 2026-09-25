@@ -2,7 +2,7 @@
   "name": "git-commit-planner",
   "displayName": "Git Commit Planner",
   "description": "Generate Git commit messages and plan multi-commit changes in VS Code with OpenRouter, Codex, or OpenCode.",
-  "version": "2.3.0",
+  "version": "2.4.0",
   "publisher": "MadElectron",
   "license": "MIT",
   "icon": "icon.png",
