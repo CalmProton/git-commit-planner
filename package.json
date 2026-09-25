@@ -395,6 +395,43 @@
             "default": "Git Commit Planner VS Code Extension",
             "order": 4,
             "description": "Sets the optional X-Title header value for OpenRouter."
+          },
+          "gitCommitPlanner.openRouter.reasoningEffort": {
+            "type": "string",
+            "scope": "resource",
+            "enum": [
+              "none",
+              "minimal",
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max",
+              ""
+            ],
+            "enumItemLabels": [
+              "none (default)",
+              "minimal",
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max",
+              "model default"
+            ],
+            "enumDescriptions": [
+              "Disables reasoning. This is the default.",
+              "Uses the smallest reasoning budget.",
+              "Uses a small reasoning budget.",
+              "Uses a moderate reasoning budget.",
+              "Uses a large reasoning budget.",
+              "Uses a very large reasoning budget.",
+              "Uses the largest reasoning budget.",
+              "Omits the reasoning setting so the model uses its own default."
+            ],
+            "default": "none",
+            "order": 5,
+            "markdownDescription": "Sets the OpenRouter reasoning effort. Reasoning tokens count against `gitCommitPlanner.maxOutputTokens`. When a model rejects `none` because reasoning is mandatory, the extension retries without a reasoning setting."
           }
         }
       },
@@ -535,6 +572,32 @@
             "maximum": 128000,
             "order": 7,
             "description": "Sets the maximum OpenRouter output tokens for Commit Planner JSON. Codex and OpenCode use their model defaults."
+          },
+          "gitCommitPlanner.ignoredGlobs": {
+            "type": "array",
+            "scope": "resource",
+            "items": {
+              "type": "string"
+            },
+            "default": [
+              "**/*.{png,jpg,jpeg,jfif,gif,webp,bmp,ico,tif,tiff,avif,heic,heif,svg}",
+              "**/*.{fbx,glb,gltf,blend,blend1,3ds,max,dae,abc,stl,ply,obj,usd,usda,usdc,usdz}",
+              "**/*.{mp4,mov,avi,mkv,webm,m4v,mp3,wav,ogg,oga,flac,m4a,aac,wma}",
+              "**/*.{zip,gz,tgz,tar,rar,7z,bz2,xz,br}",
+              "**/*.{woff,woff2,ttf,otf,eot}",
+              "**/*.{pdf,psd,psb,ai,eps,sketch,xd,fig}",
+              "**/*.{exe,dll,so,dylib,bin,wasm,class,jar,node,o,a,lib,pdb}",
+              "**/*.lock",
+              "**/package-lock.json",
+              "**/npm-shrinkwrap.json",
+              "**/pnpm-lock.yaml",
+              "**/bun.lockb",
+              "**/*.min.js",
+              "**/*.min.css",
+              "**/*.map"
+            ],
+            "order": 8,
+            "markdownDescription": "Sets glob patterns for changed files whose content is left out of the prompt. Matching files still appear in the changed-file list. Patterns without a slash match at any depth, a trailing slash matches the whole directory, and matching is case-insensitive. Set this value to an empty array to send all file content."
           }
         }
       },

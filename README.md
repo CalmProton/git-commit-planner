@@ -20,6 +20,7 @@ VS Code extension that generates Git commit messages and plans multi-commit chan
 - Supports workspace settings in `.vscode/settings.json`.
 - Writes generation summaries to the `Git Commit Planner` output channel.
 - Generates Conventional Commits messages by default, such as `fix(api): correct pagination offset`.
+- Keeps binary and asset file content out of the prompt while keeping those files in the changed-file list.
 - Adds a Commit Planner Source Control view for multi-commit changes.
 
 ## Commands
@@ -57,6 +58,7 @@ Example `.vscode/settings.json`:
   "gitCommitPlanner.codex.reasoningEffort": "",
   "gitCommitPlanner.codex.fastMode": false,
   "gitCommitPlanner.openRouter.model": "openrouter/auto",
+  "gitCommitPlanner.openRouter.reasoningEffort": "none",
   "gitCommitPlanner.opencode.model": "",
   "gitCommitPlanner.opencode.variant": "",
   "gitCommitPlanner.format": "conventional",
@@ -72,6 +74,8 @@ Example `.vscode/settings.json`:
   "gitCommitPlanner.customInstructions": "Use concise commit messages. Do not mention generated files unless they are the main change."
 }
 ```
+
+The example leaves `gitCommitPlanner.ignoredGlobs` unset, so the default content filter applies. See [File Content Filters](#file-content-filters).
 
 The Settings editor shows six categories: General, OpenRouter, Codex, OpenCode, Prompt & Limits, and Diagnostics. The setting IDs in `settings.json` stay the same.
 
@@ -93,7 +97,7 @@ OpenCode supports hosted providers and custom OpenAI-compatible endpoints. Confi
 
 The default value of `gitCommitPlanner.format` is `conventional`. Set it to `simple` or `custom` when you need another format.
 
-OpenRouter does not use reasoning tokens by default. If OpenRouter returns no message content, increase `gitCommitPlanner.maxOutputTokens`. You can also select a concrete non-reasoning model instead of `openrouter/auto`.
+OpenRouter does not use reasoning tokens by default. Set `gitCommitPlanner.openRouter.reasoningEffort` to `minimal`, `low`, `medium`, `high`, `xhigh`, or `max` to allow reasoning. Set it to an empty value to use the model default. Reasoning tokens count against `gitCommitPlanner.maxOutputTokens`, so increase that value when you enable reasoning. When a model rejects `none` because reasoning is mandatory, the extension retries without a reasoning setting. If OpenRouter returns no message content, increase `gitCommitPlanner.maxOutputTokens`, lower the reasoning effort, or select a concrete non-reasoning model instead of `openrouter/auto`.
 
 Codex uses the selected model defaults when `gitCommitPlanner.codex.reasoningEffort` is empty. OpenCode uses the selected model defaults. Commit Planner uses `gitCommitPlanner.maxPlanOutputTokens` for plan JSON.
 
@@ -124,6 +128,14 @@ The extension does not fetch OpenRouter model metadata. It uses a configurable c
 The extension uses the token limit to budget the diff. It reserves space for instructions and model output.
 
 Large diffs are split at file patch boundaries when possible. The extension can truncate the diff at these boundaries. Set `gitCommitPlanner.maxDiffChars` to add a character limit. Set it to `0` to use token budgeting only.
+
+## File Content Filters
+
+The extension leaves binary content out of the prompt. Git marks tracked binary files as `Binary files ... differ`. For untracked files, the extension checks the content for NUL bytes and invalid UTF-8 and reports binary files by path only. Untracked files larger than 1 MB are skipped without reading them.
+
+`gitCommitPlanner.ignoredGlobs` lists glob patterns for files whose content is left out of the prompt. The default list covers images, 3D assets, media, archives, fonts, documents, binaries, lockfiles, source maps, and minified JavaScript and CSS. A matching file still appears in the changed-file list, so the generated message can describe it without sending its bytes.
+
+Patterns without a slash match at any depth. For example, `*.svg` matches an SVG at any directory level. A trailing slash matches a whole directory, a leading slash is ignored, and matching is case-insensitive. Set the setting to an empty array to send all file content.
 
 ## Commit Planner
 

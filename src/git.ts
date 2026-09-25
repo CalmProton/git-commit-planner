@@ -2,6 +2,14 @@ import { execFile } from 'child_process';
 import * as path from 'path';
 import { promisify } from 'util';
 import * as vscode from 'vscode';
+import {
+  filterIgnoredPatches,
+  formatBytes,
+  looksBinary,
+  matchesAnyGlob,
+  MAX_UNTRACKED_FILE_BYTES,
+  splitFilePatches
+} from './pathFilters';
 import type { ExtensionSettings } from './settings';
 
 const execFileAsync = promisify(execFile);
@@ -149,7 +157,7 @@ export async function buildDiffContext(repository: Repository, settings: Extensi
   }
 
   if (settings.preferStaged && hasStagedChanges) {
-    const rawDiff = await getStagedDiff(repository);
+    const rawDiff = filterIgnoredPatches(await getStagedDiff(repository), settings.ignoredGlobs);
     const clipped = compactDiff(rawDiff, createDiffBudget(settings, rawDiff.length));
 
     return {
@@ -162,8 +170,10 @@ export async function buildDiffContext(repository: Repository, settings: Extensi
     };
   }
 
-  const trackedDiff = hasWorkingTreeChanges ? await getUnstagedDiff(repository) : '';
-  const untrackedDiff = await buildUntrackedDiff(repository, getEffectiveMaxDiffChars(settings));
+  const trackedDiff = hasWorkingTreeChanges
+    ? filterIgnoredPatches(await getUnstagedDiff(repository), settings.ignoredGlobs)
+    : '';
+  const untrackedDiff = await buildUntrackedDiff(repository, getEffectiveMaxDiffChars(settings), settings.ignoredGlobs);
   const rawDiff = [trackedDiff, untrackedDiff].filter(Boolean).join('\n\n');
   const clipped = compactDiff(rawDiff, createDiffBudget(settings, rawDiff.length));
 
@@ -193,8 +203,13 @@ export async function buildWorkingTreeDiffContext(repository: Repository, settin
     throw new Error('No unstaged or untracked changes found.');
   }
 
-  const trackedDiff = await getUnstagedDiff(repository);
-  const untrackedDiff = await buildUntrackedDiffFromFiles(repository, files, getEffectiveMaxDiffChars(settings));
+  const trackedDiff = filterIgnoredPatches(await getUnstagedDiff(repository), settings.ignoredGlobs);
+  const untrackedDiff = await buildUntrackedDiffFromFiles(
+    repository,
+    files,
+    getEffectiveMaxDiffChars(settings),
+    settings.ignoredGlobs
+  );
   const rawDiff = [trackedDiff, untrackedDiff].filter(Boolean).join('\n\n');
   const clipped = compactDiff(rawDiff, createDiffBudget(settings, rawDiff.length));
 
@@ -435,11 +450,6 @@ function compactDiff(diff: string, budget: DiffBudget): { diff: string; budget: 
   };
 }
 
-function splitFilePatches(diff: string): string[] {
-  const patches = diff.split(/(?=^diff --git )/m).filter(part => part.trim());
-  return patches.length > 0 ? patches : [diff];
-}
-
 function createDiffBudget(settings: ExtensionSettings, originalChars: number): DiffBudget {
   const maxPromptTokens = settings.maxPromptTokens > 0
     ? settings.maxPromptTokens
@@ -522,7 +532,11 @@ function normalizeDiff(value: unknown): string {
   return String(value);
 }
 
-async function buildUntrackedDiff(repository: Repository, maxChars: number): Promise<string> {
+async function buildUntrackedDiff(
+  repository: Repository,
+  maxChars: number,
+  ignoredGlobs: readonly string[]
+): Promise<string> {
   const chunks: string[] = [];
   let remainingChars = Math.max(1000, maxChars);
 
@@ -533,7 +547,7 @@ async function buildUntrackedDiff(repository: Repository, maxChars: number): Pro
     }
 
     const relativePath = toRelativePath(repository.rootUri, change.uri);
-    const chunk = await readUntrackedFileAsPatch(change.uri, relativePath, remainingChars);
+    const chunk = await readUntrackedFileAsPatch(change.uri, relativePath, remainingChars, ignoredGlobs);
     chunks.push(chunk);
     remainingChars -= chunk.length;
   }
@@ -544,7 +558,8 @@ async function buildUntrackedDiff(repository: Repository, maxChars: number): Pro
 async function buildUntrackedDiffFromFiles(
   repository: Repository,
   files: readonly ChangedFile[],
-  maxChars: number
+  maxChars: number,
+  ignoredGlobs: readonly string[]
 ): Promise<string> {
   const chunks: string[] = [];
   let remainingChars = Math.max(1000, maxChars);
@@ -555,7 +570,7 @@ async function buildUntrackedDiffFromFiles(
       break;
     }
 
-    const chunk = await readUntrackedFileAsPatch(file.uri, file.path, remainingChars);
+    const chunk = await readUntrackedFileAsPatch(file.uri, file.path, remainingChars, ignoredGlobs);
     chunks.push(chunk);
     remainingChars -= chunk.length;
   }
@@ -563,38 +578,56 @@ async function buildUntrackedDiffFromFiles(
   return chunks.join('\n\n');
 }
 
-async function readUntrackedFileAsPatch(uri: vscode.Uri, relativePath: string, maxChars: number): Promise<string> {
-  try {
-    const bytes = await vscode.workspace.fs.readFile(uri);
+async function readUntrackedFileAsPatch(
+  uri: vscode.Uri,
+  relativePath: string,
+  maxChars: number,
+  ignoredGlobs: readonly string[]
+): Promise<string> {
+  if (matchesAnyGlob(relativePath, ignoredGlobs)) {
+    return `Untracked file (content omitted because the path matches gitCommitPlanner.ignoredGlobs): ${relativePath}`;
+  }
 
-    if (looksBinary(bytes)) {
-      return `Untracked binary file: ${relativePath}`;
+  let bytes: Uint8Array;
+
+  try {
+    const stat = await vscode.workspace.fs.stat(uri);
+
+    if (stat.size > MAX_UNTRACKED_FILE_BYTES) {
+      return `Untracked file (content omitted because it is larger than ${formatBytes(MAX_UNTRACKED_FILE_BYTES)}): ${relativePath}`;
     }
 
-    const text = new TextDecoder('utf-8').decode(bytes);
-    const lines = text.split(/\r?\n/).map(line => `+${line}`).join('\n');
-    const patch = [
-      `diff --git a/${relativePath} b/${relativePath}`,
-      'new file mode 100644',
-      '--- /dev/null',
-      `+++ b/${relativePath}`,
-      '@@',
-      lines
-    ].join('\n');
-
-    return patch.length > maxChars
-      ? `${patch.slice(0, maxChars)}\n[Untracked file truncated.]`
-      : patch;
+    bytes = await vscode.workspace.fs.readFile(uri);
   } catch (error) {
     return `Untracked file: ${relativePath}\n[Could not read file: ${error instanceof Error ? error.message : String(error)}]`;
   }
+
+  // Guard against a file that grew between `stat` and `readFile`, or a virtual
+  // file system that reports an inaccurate size.
+  if (bytes.length > MAX_UNTRACKED_FILE_BYTES) {
+    return `Untracked file (content omitted because it is larger than ${formatBytes(MAX_UNTRACKED_FILE_BYTES)}): ${relativePath}`;
+  }
+
+  if (looksBinary(bytes)) {
+    return `Untracked binary file: ${relativePath}`;
+  }
+
+  const text = new TextDecoder('utf-8').decode(bytes);
+  const lines = text.split(/\r?\n/).map(line => `+${line}`).join('\n');
+  const patch = [
+    `diff --git a/${relativePath} b/${relativePath}`,
+    'new file mode 100644',
+    '--- /dev/null',
+    `+++ b/${relativePath}`,
+    '@@',
+    lines
+  ].join('\n');
+
+  return patch.length > maxChars
+    ? `${patch.slice(0, maxChars)}\n[Untracked file truncated.]`
+    : patch;
 }
 
 export function toRelativePath(rootUri: vscode.Uri, uri: vscode.Uri): string {
   return path.relative(rootUri.fsPath, uri.fsPath).replace(/\\/g, '/');
-}
-
-function looksBinary(bytes: Uint8Array): boolean {
-  const sample = bytes.slice(0, Math.min(bytes.length, 8000));
-  return sample.includes(0);
 }

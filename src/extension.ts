@@ -111,7 +111,10 @@ async function generateCommitMessage(context: vscode.ExtensionContext, providers
             logger.json('Settings', {
               provider: settings.provider,
               model: modelLabel(settings),
-              ...(settings.provider === 'openrouter' ? { baseUrl: settings.openRouter.baseUrl } : settings.provider === 'codex' ? {
+              ...(settings.provider === 'openrouter' ? {
+                baseUrl: settings.openRouter.baseUrl,
+                reasoningEffort: settings.openRouter.reasoningEffort
+              } : settings.provider === 'codex' ? {
                 codexCommand: settings.codex.command,
                 reasoningEffort: settings.codex.reasoningEffort,
                 fastMode: settings.codex.fastMode
@@ -136,6 +139,7 @@ async function generateCommitMessage(context: vscode.ExtensionContext, providers
               language: settings.language,
               temperature: settings.temperature,
               maxOutputTokens: settings.maxOutputTokens,
+              ignoredGlobs: settings.ignoredGlobs,
               customInstructionsConfigured: Boolean(settings.customInstructions.trim())
             });
             logger.json('Git context', {

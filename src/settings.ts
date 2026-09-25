@@ -1,9 +1,11 @@
 import * as vscode from 'vscode';
+import { DEFAULT_IGNORED_GLOBS } from './pathFilters';
 
 export type CommitFormat = 'conventional' | 'simple' | 'custom';
 export type IncludeBody = 'never' | 'auto' | 'always';
 export type Provider = 'openrouter' | 'codex' | 'opencode';
 export type CodexReasoningEffort = string;
+export type OpenRouterReasoningEffort = string;
 
 export interface ExtensionSettings {
   provider: Provider;
@@ -12,6 +14,7 @@ export interface ExtensionSettings {
     model: string;
     siteUrl: string;
     appTitle: string;
+    reasoningEffort: OpenRouterReasoningEffort;
   };
   codex: {
     command: string;
@@ -37,6 +40,7 @@ export interface ExtensionSettings {
   temperature: number;
   maxOutputTokens: number;
   maxPlanOutputTokens: number;
+  ignoredGlobs: string[];
   debugLogging: boolean;
 }
 
@@ -49,7 +53,8 @@ export function getSettings(resource?: vscode.Uri): ExtensionSettings {
       baseUrl: config.get<string>('openRouter.baseUrl', 'https://openrouter.ai/api/v1'),
       model: config.get<string>('openRouter.model', 'openrouter/auto'),
       siteUrl: config.get<string>('openRouter.siteUrl', ''),
-      appTitle: config.get<string>('openRouter.appTitle', 'Git Commit Planner VS Code Extension')
+      appTitle: config.get<string>('openRouter.appTitle', 'Git Commit Planner VS Code Extension'),
+      reasoningEffort: config.get<OpenRouterReasoningEffort>('openRouter.reasoningEffort', 'none')
     },
     codex: {
       command: config.get<string>('codex.command', 'codex'),
@@ -75,6 +80,17 @@ export function getSettings(resource?: vscode.Uri): ExtensionSettings {
     temperature: config.get<number>('temperature', 0.2),
     maxOutputTokens: config.get<number>('maxOutputTokens', 800),
     maxPlanOutputTokens: config.get<number>('maxPlanOutputTokens', 32000),
+    ignoredGlobs: readIgnoredGlobs(config),
     debugLogging: config.get<boolean>('debugLogging', false)
   };
+}
+
+function readIgnoredGlobs(config: vscode.WorkspaceConfiguration): string[] {
+  const value = config.get<unknown>('ignoredGlobs', DEFAULT_IGNORED_GLOBS);
+
+  if (!Array.isArray(value)) {
+    return [...DEFAULT_IGNORED_GLOBS];
+  }
+
+  return value.filter((glob): glob is string => typeof glob === 'string');
 }
